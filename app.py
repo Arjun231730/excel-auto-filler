@@ -43,7 +43,7 @@ def extract_data_with_gemini(content, mime_type, columns):
         return None
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 
     # Dynamic Prompt: We tell AI EXACTLY what columns to look for
     column_list_str = ", ".join(columns)
@@ -199,4 +199,5 @@ if st.session_state.template_columns:
 
 else:
     st.info("👆 Please upload your Excel Template in Step 1 to begin.")
+
     

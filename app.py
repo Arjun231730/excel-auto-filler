@@ -3,14 +3,16 @@ import pandas as pd
 import google.generativeai as genai
 import json
 from io import BytesIO
+from PIL import Image
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Excel Bot", layout="wide")
-st.title("🤖 100% Accuracy AI Data Entry")
+st.title("🤖 Smart Receipt Parser (Final Version)")
 
 # --- SIDEBAR: SETTINGS ---
 with st.sidebar:
     st.header("🔑 Settings")
+    # Try to load key from Secrets, else ask user
     if 'GOOGLE_API_KEY' in st.secrets:
         api_key = st.secrets['GOOGLE_API_KEY']
         st.success("Key loaded automatically!")
@@ -32,35 +34,43 @@ def extract_data_with_gemini(content, mime_type, columns):
 
     genai.configure(api_key=api_key)
     
-    # Use the stable, high-performance model
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    # Use the smartest model available for complex tables
+    model = genai.GenerativeModel('gemini-2.0-flash')
 
     column_list_str = ", ".join(columns)
     
-    # --- UPDATED PROMPT FOR ACCURACY ---
+    # --- PROMPT: SPECIFIC RULES FOR ACCURACY ---
     prompt = f"""
-    You are an expert data entry specialist. 
-    Analyze the provided input (Image or Text) and extract data to fill these Excel columns: [{column_list_str}]
+    You are an expert data entry specialist. Analyze the provided receipt/invoice.
     
-    STRICT DATA RULES:
-    1. **Column 'TYPE'**: You MUST extract the specific **Vegetable or Fruit Name** (e.g., "Bottle Gourd", "Tomato", "Apple"). 
-       - NEVER use generic words like "Receipt", "Bill", "Vegetable", or "Food".
-       - If the text says "Baby Bottle Gourd-4.5", extract "Baby Bottle Gourd".
-    2. **Column 'COMPANY'**: Extract the company name (e.g., "Moksh Enterprises", "Ninjacart").
-    3. **Column 'ID NO'**: Extract the PO ID or Invoice Number.
-    4. **Column 'PRICE'**: Extract the total amount.
-    5. **Column 'DATE'**: Extract the date in DD/MM/YYYY format.
-    6. **General**: If a column's data is missing, use an empty string "".
-    
-    Output Format: return ONLY a raw JSON list of objects.
-    Example: [{{"TYPE": "Baby Bottle Gourd", "COMPANY": "Ninjacart", "PRICE": "3471.30", ...}}]
+    TARGET EXCEL COLUMNS: [{column_list_str}]
+
+    CRITICAL EXTRACTION RULES:
+    1. **MULTIPLE ITEMS:** If the receipt contains a TABLE with multiple items, extract EACH item as a separate row. 
+       - Do not combine vegetables. "Tomato" and "Potato" must be two different rows.
+    2. **COLUMN 'TYPE':** Extract the specific **Product Name** (e.g., "Baby Bottle Gourd", "Tomato"). 
+       - NEVER use generic words like "Receipt", "Bill", or "Vegetable". 
+       - Look for the "Description" or "Item Name" column in the image.
+    3. **COLUMN 'UNIT' / 'QTY':** Extract the **Quantity** or **Graded Qty**.
+       - Look for columns in the bill named "Graded Qty", "Qty", "Quantity", or "Net Weight".
+       - Example: If bill says "Graded Qty: 340", fill "340" in the UNIT column.
+    4. **COLUMN 'COMPANY':** Extract the business name (e.g., "Moksh Enterprises", "Ninjacart").
+    5. **COLUMN 'ID NO':** Extract the Invoice No or PO Number.
+    6. **DUPLICATES:** If the image shows two identical bills side-by-side, ignore the second copy.
+
+    Output Format: Return ONLY a raw JSON list of objects.
+    Example: 
+    [
+        {{"TYPE": "Baby Bottle Gourd", "UNIT": "340", "COMPANY": "Moksh", "PRICE": "5440", ...}},
+        {{"TYPE": "Tomato", "UNIT": "120", "COMPANY": "Moksh", "PRICE": "200", ...}}
+    ]
     """
 
     try:
         response = model.generate_content([prompt, content])
         text_res = response.text.strip()
         
-        # Clean up Markdown formatting if the AI adds it
+        # Clean up JSON formatting if AI adds backticks
         if text_res.startswith("```json"):
             text_res = text_res[7:-3]
         elif text_res.startswith("```"):
@@ -81,7 +91,6 @@ if template_file:
         df_template = pd.read_excel(template_file)
         st.session_state.template_columns = df_template.columns.tolist()
         
-        # Initialize the master dataframe if it's new
         if st.session_state.final_data.empty:
             st.session_state.final_data = pd.DataFrame(columns=st.session_state.template_columns)
             
@@ -108,19 +117,27 @@ if template_file:
                     bar = st.progress(0)
                     new_rows = []
                     for i, file in enumerate(img_files):
-                        from PIL import Image
                         img = Image.open(file)
                         
                         data = extract_data_with_gemini(img, "image/jpeg", st.session_state.template_columns)
                         if data:
-                            if isinstance(data, list): new_rows.extend(data)
-                            else: new_rows.append(data)
+                            if isinstance(data, list):
+                                new_rows.extend(data)
+                            else:
+                                new_rows.append(data)
+                                
                         bar.progress((i+1)/len(img_files))
                     
                     if new_rows:
+                        # 1. Add new data
                         new_df = pd.DataFrame(new_rows)
                         st.session_state.final_data = pd.concat([st.session_state.final_data, new_df], ignore_index=True)
-                        st.success("Done!")
+                        
+                        # 2. AUTO-REMOVE EXACT DUPLICATES (Fixes Double Bill Issue)
+                        # This removes rows where every single value is identical
+                        st.session_state.final_data.drop_duplicates(inplace=True)
+                        
+                        st.success("Extraction Complete!")
                         st.rerun()
 
         elif input_type == "Text 📝":
@@ -130,8 +147,11 @@ if template_file:
                 if data:
                     if isinstance(data, list): new_rows = data
                     else: new_rows = [data]
+                    
                     new_df = pd.DataFrame(new_rows)
                     st.session_state.final_data = pd.concat([st.session_state.final_data, new_df], ignore_index=True)
+                    st.session_state.final_data.drop_duplicates(inplace=True)
+                    
                     st.success("Done!")
                     st.rerun()
 
@@ -141,15 +161,13 @@ if template_file:
         
         if not st.session_state.final_data.empty:
             
-            # --- CRITICAL FIX FOR "ARROW INVALID" ERROR ---
-            # We convert everything to Text (String) just for the display to prevent the crash.
-            # The downloaded Excel will still be correct.
+            # --- CRITICAL FIX: CONVERT TO STRING FOR DISPLAY ---
+            # This prevents the "ArrowInvalid" crash in Streamlit
             display_df = st.session_state.final_data.copy()
-            display_df = display_df.astype(str) 
+            display_df = display_df.astype(str)
             display_df = display_df.replace('nan', '')
             display_df = display_df.replace('None', '')
-            # ----------------------------------------------
-
+            
             # EDITABLE GRID
             edited_df = st.data_editor(
                 display_df, 
@@ -165,12 +183,13 @@ if template_file:
             # DOWNLOAD
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Write the dataframe to Excel
                 edited_df.to_excel(writer, index=False)
             
             st.download_button(
-                label="⬇️ Download Completed Excel",
+                label="⬇️ Download Excel",
                 data=output.getvalue(),
-                file_name="Completed_Data.xlsx",
+                file_name="Final_Data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary"
             )
@@ -180,4 +199,3 @@ if template_file:
                 st.rerun()
         else:
             st.info("Data will appear here after extraction.")
-

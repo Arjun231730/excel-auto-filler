@@ -4,200 +4,179 @@ import google.generativeai as genai
 import json
 from io import BytesIO
 
-# --- CONFIGURATION & SETUP ---
-st.set_page_config(page_title="Universal Excel Filler", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Auto-Excel Bot", layout="wide")
+st.title("🤖 100% Accuracy AI Data Entry")
 
-st.title("🤖 AI Auto-Fill for Excel")
-st.markdown("""
-**Workflow:**
-1. Upload your **Template Excel Sheet** (so I know what columns you need).
-2. Upload **Images** or Paste **Text**.
-3. Review the data and **Download**.
-""")
-
-# --- SIDEBAR: API KEY ---
+# --- SIDEBAR: SETTINGS ---
 with st.sidebar:
     st.header("🔑 Settings")
-    # Tries to get key from secrets first (for hosted version), else asks user
     if 'GOOGLE_API_KEY' in st.secrets:
         api_key = st.secrets['GOOGLE_API_KEY']
-        st.success("API Key loaded securely!")
+        st.success("Key loaded automatically!")
     else:
-        api_key = st.text_input("Enter Google Gemini API Key", type="password")
-        st.markdown("[Get Key Here](https://aistudio.google.com/)")
+        api_key = st.text_input("Enter Google API Key", type="password")
+        st.markdown("[Get Free Key](https://aistudio.google.com/)")
 
-# --- SESSION STATE (To remember data between clicks) ---
+# --- SESSION STATE ---
 if 'final_data' not in st.session_state:
     st.session_state.final_data = pd.DataFrame()
 if 'template_columns' not in st.session_state:
     st.session_state.template_columns = []
 
-# --- AI FUNCTION ---
+# --- AI EXTRACTION FUNCTION ---
 def extract_data_with_gemini(content, mime_type, columns):
-    """
-    Sends image/text + column names to AI. 
-    Returns a dictionary matching the columns.
-    """
     if not api_key:
-        st.error("Missing API Key!")
+        st.error("Please add your API Key first!")
         return None
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    # Use the stable, high-performance model
+    model = genai.GenerativeModel('gemini-2.0-flash')
 
-    # Dynamic Prompt: We tell AI EXACTLY what columns to look for
     column_list_str = ", ".join(columns)
     
+    # --- UPDATED PROMPT FOR ACCURACY ---
     prompt = f"""
-    You are a strict data extraction bot.
+    You are an expert data entry specialist. 
+    Analyze the provided input (Image or Text) and extract data to fill these Excel columns: [{column_list_str}]
     
-    Task: Extract information from the provided input to fill a database row.
+    STRICT DATA RULES:
+    1. **Column 'TYPE'**: You MUST extract the specific **Vegetable or Fruit Name** (e.g., "Bottle Gourd", "Tomato", "Apple"). 
+       - NEVER use generic words like "Receipt", "Bill", "Vegetable", or "Food".
+       - If the text says "Baby Bottle Gourd-4.5", extract "Baby Bottle Gourd".
+    2. **Column 'COMPANY'**: Extract the company name (e.g., "Moksh Enterprises", "Ninjacart").
+    3. **Column 'ID NO'**: Extract the PO ID or Invoice Number.
+    4. **Column 'PRICE'**: Extract the total amount.
+    5. **Column 'DATE'**: Extract the date in DD/MM/YYYY format.
+    6. **General**: If a column's data is missing, use an empty string "".
     
-    TARGET COLUMNS: [{column_list_str}]
-    
-    RULES:
-    1. Only extract data that matches the meaning of the Target Columns.
-    2. If a column is "COMPANY", look for store names or organizations (e.g., "Moksh", "Ninjacart").
-    3. If a column is "PRICE" or "AMOUNT", look for the total value.
-    4. If data for a column is NOT found in the input, return null (empty).
-    5. Return ONLY a valid JSON object. Keys must match the TARGET COLUMNS exactly.
-    6. If the input contains a table with multiple items, return a LIST of JSON objects (one for each row).
-    
-    Example Output format:
-    [
-        {{"{columns[0]}": "Value1", "{columns[1]}": "Value2", ...}},
-        {{"{columns[0]}": "Value3", "{columns[1]}": "Value4", ...}}
-    ]
+    Output Format: return ONLY a raw JSON list of objects.
+    Example: [{{"TYPE": "Baby Bottle Gourd", "COMPANY": "Ninjacart", "PRICE": "3471.30", ...}}]
     """
 
     try:
-        # Generate content
         response = model.generate_content([prompt, content])
-        
-        # Clean response (remove markdown if present)
         text_res = response.text.strip()
+        
+        # Clean up Markdown formatting if the AI adds it
         if text_res.startswith("```json"):
             text_res = text_res[7:-3]
-        
+        elif text_res.startswith("```"):
+            text_res = text_res[3:-3]
+            
         return json.loads(text_res)
     except Exception as e:
         st.error(f"AI Error: {e}")
         return []
 
-# --- STEP 1: UPLOAD EXCEL TEMPLATE ---
-st.subheader("Step 1: Upload Template Excel")
-template_file = st.file_uploader("Upload the Excel file you want to fill", type=['xlsx', 'xls'])
+# --- MAIN APP LAYOUT ---
+st.info("Step 1: Upload your empty Excel sheet to define columns.")
+template_file = st.file_uploader("Upload Empty Excel Template", type=['xlsx', 'xls'])
 
 if template_file:
-    # Read headers
+    # Load Template
     try:
         df_template = pd.read_excel(template_file)
         st.session_state.template_columns = df_template.columns.tolist()
-        st.success(f"✅ Columns Detected: {st.session_state.template_columns}")
         
-        # Initialize session dataframe with these columns if empty
+        # Initialize the master dataframe if it's new
         if st.session_state.final_data.empty:
             st.session_state.final_data = pd.DataFrame(columns=st.session_state.template_columns)
             
-    except Exception as e:
-        st.error("Error reading Excel file. Make sure it's valid.")
-
-# --- STEP 2: DATA INPUT ---
-if st.session_state.template_columns:
-    st.markdown("---")
-    st.subheader("Step 2: Upload Data Sources")
-    
-    col_input, col_preview = st.columns([1, 2])
-    
-    with col_input:
-        tab1, tab2 = st.tabs(["📸 Images", "📝 Text"])
+        st.success(f"✅ Columns Found: {st.session_state.template_columns}")
         
-        # --- IMAGE INPUT ---
-        with tab1:
-            img_files = st.file_uploader("Upload Images", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
-            if st.button("Process Images"):
+    except Exception as e:
+        st.error("Error reading template file.")
+
+    st.markdown("---")
+
+    col_left, col_right = st.columns([1, 1.5])
+
+    # --- LEFT: INPUTS ---
+    with col_left:
+        st.subheader("Step 2: Upload Data")
+        input_type = st.radio("Select Input Type:", ["Images 📸", "Text 📝"], horizontal=True)
+
+        if input_type == "Images 📸":
+            img_files = st.file_uploader("Select Images", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+            if st.button("Extract Data from Images"):
                 if not img_files:
-                    st.warning("No images selected.")
+                    st.warning("Please choose images first.")
                 else:
-                    progress = st.progress(0)
+                    bar = st.progress(0)
                     new_rows = []
-                    
-                    for idx, img_file in enumerate(img_files):
-                        # Convert to format for Gemini
+                    for i, file in enumerate(img_files):
                         from PIL import Image
-                        image_data = Image.open(img_file)
+                        img = Image.open(file)
                         
-                        extracted = extract_data_with_gemini(image_data, "image/jpeg", st.session_state.template_columns)
-                        
-                        if extracted:
-                            # If list (multiple rows), extend. If dict (single row), append.
-                            if isinstance(extracted, list):
-                                new_rows.extend(extracted)
-                            else:
-                                new_rows.append(extracted)
-                        
-                        progress.progress((idx + 1) / len(img_files))
+                        data = extract_data_with_gemini(img, "image/jpeg", st.session_state.template_columns)
+                        if data:
+                            if isinstance(data, list): new_rows.extend(data)
+                            else: new_rows.append(data)
+                        bar.progress((i+1)/len(img_files))
                     
-                    # Add to master data
                     if new_rows:
                         new_df = pd.DataFrame(new_rows)
                         st.session_state.final_data = pd.concat([st.session_state.final_data, new_df], ignore_index=True)
-                        st.success("Images Processed!")
+                        st.success("Done!")
+                        st.rerun()
 
-        # --- TEXT INPUT ---
-        with tab2:
-            txt_input = st.text_area("Paste Text (WhatsApp/SMS)")
-            if st.button("Process Text"):
-                if not txt_input:
-                    st.warning("No text entered.")
-                else:
-                    extracted = extract_data_with_gemini(txt_input, "text/plain", st.session_state.template_columns)
-                    if extracted:
-                        if isinstance(extracted, list):
-                            new_df = pd.DataFrame(extracted)
-                        else:
-                            new_df = pd.DataFrame([extracted])
-                            
-                        st.session_state.final_data = pd.concat([st.session_state.final_data, new_df], ignore_index=True)
-                        st.success("Text Processed!")
+        elif input_type == "Text 📝":
+            txt_in = st.text_area("Paste text here...", height=200)
+            if st.button("Extract Data from Text"):
+                data = extract_data_with_gemini(txt_in, "text/plain", st.session_state.template_columns)
+                if data:
+                    if isinstance(data, list): new_rows = data
+                    else: new_rows = [data]
+                    new_df = pd.DataFrame(new_rows)
+                    st.session_state.final_data = pd.concat([st.session_state.final_data, new_df], ignore_index=True)
+                    st.success("Done!")
+                    st.rerun()
 
-    # --- STEP 3: PREVIEW & EDIT ---
-    with col_preview:
-        st.subheader("Step 3: Preview & Edit")
-        st.info("Double-click any cell to fix mistakes before downloading.")
+    # --- RIGHT: PREVIEW & DOWNLOAD ---
+    with col_right:
+        st.subheader("Step 3: Verify & Download")
         
-        # EDITABLE DATA FRAME
-        edited_df = st.data_editor(
-            st.session_state.final_data,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="editor"
-        )
-        
-        # Sync changes back to session state
-        st.session_state.final_data = edited_df
-
-        st.markdown("---")
-        
-        # --- STEP 4: EXPORT ---
-        # Logic to preserve user's template headers
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            edited_df.to_excel(writer, index=False, sheet_name='Sheet1')
+        if not st.session_state.final_data.empty:
             
-        st.download_button(
-            label="⬇️ Download Final Excel",
-            data=output.getvalue(),
-            file_name="Filled_Data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
-        
-        if st.button("🗑️ Clear All Rows"):
-            st.session_state.final_data = pd.DataFrame(columns=st.session_state.template_columns)
-            st.rerun()
+            # --- CRITICAL FIX FOR "ARROW INVALID" ERROR ---
+            # We convert everything to Text (String) just for the display to prevent the crash.
+            # The downloaded Excel will still be correct.
+            display_df = st.session_state.final_data.copy()
+            display_df = display_df.astype(str) 
+            display_df = display_df.replace('nan', '')
+            display_df = display_df.replace('None', '')
+            # ----------------------------------------------
 
-else:
-    st.info("👆 Please upload your Excel Template in Step 1 to begin.")
-
-    
+            # EDITABLE GRID
+            edited_df = st.data_editor(
+                display_df, 
+                num_rows="dynamic", 
+                use_container_width=True,
+                height=500,
+                key="editor"
+            )
+            
+            # Save edits back to main state
+            st.session_state.final_data = edited_df
+            
+            # DOWNLOAD
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                edited_df.to_excel(writer, index=False)
+            
+            st.download_button(
+                label="⬇️ Download Completed Excel",
+                data=output.getvalue(),
+                file_name="Completed_Data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+            
+            if st.button("Clear All Data"):
+                st.session_state.final_data = pd.DataFrame(columns=st.session_state.template_columns)
+                st.rerun()
+        else:
+            st.info("Data will appear here after extraction.")

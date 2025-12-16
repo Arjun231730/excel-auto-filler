@@ -33,7 +33,7 @@ def extract_data_with_gemini(content, mime_type, columns):
     genai.configure(api_key=api_key)
     
     # Use the stable, high-performance model
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 
     column_list_str = ", ".join(columns)
     
@@ -180,3 +180,4 @@ if template_file:
                 st.rerun()
         else:
             st.info("Data will appear here after extraction.")
+
